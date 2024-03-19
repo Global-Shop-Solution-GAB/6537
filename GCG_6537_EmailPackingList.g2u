@@ -1,0 +1,371 @@
+﻿Program.Sub.Preflight.Start
+V.Global.sError.Declare(String)
+
+Program.Sub.Preflight.End
+
+Program.Sub.Main.Start
+'Author: Arturo Almaguer
+'Date: 09 November 2021
+'Customer: Nyle Systems, quote number 13032
+'This program saves the packlist as PDF and sends notification emails out through Courier
+'This script is triggered from Shipment Post-Save 28532 hook
+
+Function.Intrinsic.UI.UsePixels ' Allows you to use Pixels instead of Twips throughout
+
+F.Intrinsic.Control.Try
+
+	V.Local.sPackingList.Declare(String)
+	V.Local.sBDF.Declare(String)
+	V.Local.sCustPO.Declare(String)
+	V.Local.dShipDate.Declare(Date)
+	V.Local.sCustomerNo.Declare(String)
+	V.Local.sSQL.Declare(String)
+	V.Local.sSalesperson.Declare(String)
+
+	'000168 - Packing List Num, 000204 - Customer No, 000206 - Ship Date, 000328 - Customer PO, AUX001 - BDF
+	
+	F.Intrinsic.String.LPad(V.Passed.000168,"0",7,V.Local.sPackingList)
+	F.Intrinsic.Date.ConvertDString(V.Passed.000206,"MMDDYY",V.Local.dShipDate)
+	
+	V.Local.sBDF.Set("ShippingLines")
+	F.Intrinsic.BDF.Load(V.Local.sBDF,"AUX001")
+	
+	'This subroutine will return either a singular order number or "Multiple" if there is more than one order on the shipment
+	F.Intrinsic.Control.CallSub(GetOrderFromBDF,"BDF",V.Local.sBDF)
+	'V.Args.SO
+	
+	'User might have an invalid symbol in customer PO
+	F.Intrinsic.File.MakeFilenameFriendly(V.Passed.000328.RTrim,V.Local.sCustPO)
+	
+	F.ODBC.Connection!Con.OpenCompanyConnection
+	'Getting the assigned salesperson to the SO
+	Function.Intrinsic.String.Build("select RTRIM(B.NAME) NAME, RTRIM(B.EMAIL) EMAIL from V_ORDER_HEADER A inner join V_SALESPERSONS B on A.SALESPERSON = B.ID where A.ORDER_NO = '{0}' and B.EMAIL <> '' order by B.NAME", V.Args.SO, V.Local.sSQL)
+	F.ODBC.Connection!Con.ExecuteAndReturn(V.Local.sSQL, V.Local.sSalesperson)
+	
+	F.Intrinsic.Control.If(V.Ambient.ExecuteAndReturnEOF)
+	
+		'If SO doesn't have a Salesrep assigned, then display error message
+		F.Intrinsic.UI.Msgbox("No salesperson assigned to SO. Program closing.", "GCG 6537")
+		F.Intrinsic.Control.CallSub("Unload")
+		
+	F.Intrinsic.Control.EndIf
+	
+	'This will generate the Packing List in PDF format
+	F.Intrinsic.Control.CallSub(GeneratePDF,"PackingList",V.Local.sPackingList,"SO",V.Args.SO,"ShipDate",V.Local.dShipDate,"CustPO",V.Local.sCustPO)
+	
+	'Getting CRM Customer Contact where User Field 16 is marked as 'EPACK' 
+	V.Local.sCustomerNo.Set(V.Passed.000204)
+	Function.Intrinsic.String.Build("select RTRIM(A.NAME) NAME, RTRIM(A.EMAIL1) EMAIL from V_CONTACT A inner join CRM_UF_VALUE B on A.ALT_ID = B.CID where A.CUST = '{0}' and A.EMAIL1 <> '' and B.UF16 = 'EPACK' order by A.NAME", V.Local.sCustomerNo, V.Local.sSQL)
+	f.Data.DataTable.CreateFromSQL("dtContacts", "Con", V.Local.sSQL, True)
+	F.ODBC.Connection!Con.Close
+	
+	'Calling subroutine to create email
+	F.Intrinsic.Control.CallSub("QueueEmail", "Salesrep", V.Local.sSalesperson, "PackingList",V.Local.sPackingList, "SO",V.Args.SO,"ShipDate",V.Local.dShipDate.FormatMM/DD/YYYY,"CustNo",V.Local.sCustomerNo, "CustPO",V.Local.sCustPO)
+	
+F.Intrinsic.Control.Catch
+
+	F.Intrinsic.Control.CallSub(CatchError)
+	
+F.Intrinsic.Control.EndTry
+
+Program.Sub.Main.End
+Program.Sub.GeneratePDF.Start
+'This subroutine was taken from ARC ID 6507 project.
+'V.Args.PackingList, V.Args.SO, V.Args.ShipDate, V.Args.CustPO
+'Generates Packing List PDF based on passed values. Doesn't require a DB connection
+
+F.Intrinsic.Control.Try
+
+	V.Local.sReportID.Declare
+	V.Local.sCallwrapper.Declare
+	V.Local.sFile.Declare
+	V.Local.sSuffix.Declare
+	V.Local.sFileSuffix.Declare
+	V.Local.sParams.Declare
+	V.Local.sValues.Declare
+	V.Local.sCustPO.Declare
+	V.Local.iBIRunID.Declare
+	V.Local.iBILogID.Declare
+	V.Local.iFileLength.Declare
+	V.Local.iRet.Declare
+	V.Local.bExists.Declare
+	
+	F.Intrinsic.Control.CallSub("CheckTempDir")
+	
+	F.Global.BI.GetRunID(V.Local.iBIRunID)
+	
+	V.Local.sReportID.Set("000051")
+	F.Global.BI.StartLogging(V.Local.iBIRunID,V.Local.sReportID.Long,-1,"",V.Local.iBILogID)
+	
+	'http://gab.gss-help.com/index.php?title=Sales.Shipping.PrintPackingList_Callwrapper
+	V.Local.sCallwrapper.Set("PackingListBI")
+	F.Global.Callwrapper.New(V.Local.sCallwrapper,"Sales.Shipping.PrintPackingList")
+	
+	F.Global.Callwrapper.SetProperty(V.Local.sCallwrapper,"CompanyCode",V.Caller.CompanyCode)
+	F.Global.Callwrapper.SetProperty(V.Local.sCallwrapper,"CallingProgram","Packing List Email Batches (6507)")
+	F.Global.Callwrapper.SetProperty(V.Local.sCallwrapper,"SuppressDueDate",False)
+	F.Global.Callwrapper.SetProperty(V.Local.sCallwrapper,"SuppressCustomsInvoice",True)
+	F.Global.Callwrapper.SetProperty(V.Local.sCallwrapper,"BIOverride",True)
+	F.Global.Callwrapper.SetProperty(V.Local.sCallwrapper,"SuppressErrors",True)
+	F.Global.Callwrapper.SetProperty(V.Local.sCallwrapper,"PackingListNumber",V.Args.PackingList.Long)
+	F.Global.Callwrapper.SetProperty(V.Local.sCallwrapper,"ShippedDate",V.Args.ShipDate)
+	F.Global.Callwrapper.SetProperty(V.Local.sCallwrapper,"Staged",False)
+	
+	F.Global.Callwrapper.Run(V.Local.sCallwrapper)
+	
+	F.Global.BI.StopLogging(V.Local.iBILogID)
+	
+	'Data is generated, Save packing list PDF to file
+	F.Intrinsic.String.Replace(V.Args.CustPO,"-","",V.Local.sCustPO)
+	F.Intrinsic.String.Build("{0}Nyle_Packlist_{1}.pdf", V.Args.FilePath, V.Args.PackingList,V.Local.sFile)
+	V.Local.sParams.Set("Terminal*!*REPORTID*!*PCKNO")
+	F.Intrinsic.String.Build("{0}*!*{1}*!*{2}",V.Caller.Terminal,V.Local.sReportID,V.Args.PackingList,V.Local.sValues)
+	
+	F.Global.BI.RunReportPreProcessor(V.Local.iBIRunID,V.Local.iBILogID,V.Local.sParams,V.Local.sValues,"",4,True,"",0,"",0,V.Local.sFile,"",V.Local.iRet)
+
+F.Intrinsic.Control.Catch
+
+	F.Intrinsic.Control.CallSub(CatchError)
+	
+F.Intrinsic.Control.EndTry
+
+Program.Sub.GeneratePDF.End
+Program.Sub.CheckTempDir.Start
+'This subruotine creates the directory to store the packlist in PDF format
+
+F.Intrinsic.Control.Try
+
+	V.Local.sPath.Declare(String)
+	V.Local.bExists.Declare(Boolean)
+	V.Local.sError.Declare(String)
+	
+	F.Intrinsic.String.Build("{0}\Packlist\", V.Caller.DocDir, V.Local.sPath)
+	F.Intrinsic.File.DirExists(V.Local.sPath, V.Local.bExists)
+	F.Intrinsic.Control.If(V.Local.bExists.Not)
+	
+		'Creates directory if it doesn't exist
+		F.Intrinsic.File.CreateDir(V.Local.sPath)
+	
+	F.Intrinsic.Control.EndIf
+	
+	'Return variable for the file path of the directory
+	F.Intrinsic.Variable.AddRV("FilePath", V.Local.sPath)
+
+F.Intrinsic.Control.Catch
+
+	F.Intrinsic.Control.CallSub(CatchError)
+	
+F.Intrinsic.Control.EndTry
+
+Program.Sub.CheckTempDir.End
+Program.Sub.GetOrderFromBDF.Start
+'This subroutine was taken from ARC ID 6507 project.
+'V.Args.BDF - passing BDF name in case i need to use this anywhere else
+'Reads the Sales Order from Shipping BDF. If more than one order is found, return "Multiple"
+
+F.Intrinsic.Control.Try
+	
+	V.Local.sOrders.Declare
+	V.Local.sBDFRead.Declare
+	V.Local.iCnt.Declare
+	V.Local.iRowCnt.Declare
+	V.Local.iNewUBound.Declare
+	V.Local.bInArray.Declare
+	
+	F.Intrinsic.BDF.ReadRowCount(V.Args.BDF,V.Local.iRowCnt)
+	F.Intrinsic.Math.Sub(V.Local.iRowCnt,1,V.Local.iRowCnt)
+	
+	F.Intrinsic.BDF.TextMatrix(V.Args.BDF,0,0,V.Local.sOrders)
+	F.Intrinsic.Control.For(V.Local.iCnt,1,V.Local.iRowCnt,1)
+		F.Intrinsic.BDF.TextMatrix(V.Args.BDF,0,V.Local.iCnt,V.Local.sBDFRead)
+		F.Intrinsic.Control.If(V.Local.sOrders,<>,V.Local.sBDFRead)
+			V.Local.sOrders.Set("Multiple")
+			F.Intrinsic.Control.ExitFor(V.Local.iCnt)
+		F.Intrinsic.Control.EndIf
+	F.Intrinsic.Control.Next(V.Local.iCnt)
+	
+	F.Intrinsic.String.LPad(V.Local.sOrders,"0",7,V.Local.sOrders)
+	F.Intrinsic.Variable.AddRV("SO",V.Local.sOrders)
+
+F.Intrinsic.Control.Catch
+
+	F.Intrinsic.Control.CallSub(CatchError)
+	
+F.Intrinsic.Control.EndTry
+
+Program.Sub.GetOrderFromBDF.End
+Program.Sub.QueueEmail.Start
+'This subroutine generates the email that will be sent to the customer and the salesperson
+'V.Args.Salesrep, V.Args.PackingList, V.Args.SO, V.Args.ShipDate, V.Args.CustPO
+
+F.Intrinsic.Control.Try
+
+	V.Local.sFile.Declare(String)
+	V.Local.bExists.Declare(Boolean)
+	V.Local.sText.Declare(String)
+	V.Local.sSubject.Declare(String)
+	V.Local.sBody.Declare(String)
+	V.Local.iUserID.Declare(Long)
+	V.Local.sSender.Declare(String)
+	V.Local.sSenderEmail.Declare(String)
+	V.Local.sSenderName.Declare(String)
+	V.Local.sFilePath.Declare(String)
+	V.Local.sAttachment.Declare(String)
+	V.Local.sFinalPath.Declare(String)
+	V.Local.sRecipients.Declare(String)
+	V.Local.sTemp.Declare(String)
+	V.Local.iCounter.Declare(Long)
+	V.Local.sCustName.Declare(String)
+	V.Local.sSQL.Declare(String)
+	V.Local.bApprovalFlag.Declare(Boolean)
+	
+	'Processing text file, which has stored the default email's subject and body
+	F.Intrinsic.String.Build("{0}\GCG_6537_DefaultText.txt", V.Caller.GasDir, V.Local.sFile)
+	F.Intrinsic.File.Exists(V.Local.sFile,V.Local.bExists)
+	F.Intrinsic.Control.If(V.Local.bExists,=,True)
+		
+		'Converting file to string
+		F.Intrinsic.File.File2String(V.Local.sFile,V.Local.sText)
+		
+		'Replacing wildcards
+		F.Intrinsic.String.Replace(V.Local.sText,"%PACKINGLIST%", V.Args.PackingList, V.Local.sText)
+		F.Intrinsic.String.Replace(V.Local.sText,"%ORDERNO%", V.Args.SO, V.Local.sText)
+		F.Intrinsic.String.Replace(V.Local.sText,"%CUSTPO%", V.Args.CustPO, V.Local.sText)
+		F.Intrinsic.String.Replace(V.Local.sText,"%SHIPDATE%", V.Args.ShipDate, V.Local.sText)
+		F.Intrinsic.String.Replace(V.Local.sText,"%COMPANY%", V.Ambient.CompanyName, V.Local.sText)
+		
+		'Getting customer name
+		F.ODBC.Connection!Con.OpenCompanyConnection
+		f.Intrinsic.String.Build("select RTRIM(NAME_CUSTOMER) from V_CUSTOMER_MASTER where CUSTOMER = '{0}'", V.Args.CustNo, v.Local.sSQL)
+		F.ODBC.Connection!Con.ExecuteAndReturn(V.Local.sSQL, V.Local.sCustName)
+		F.ODBC.Connection!Con.Close
+		F.Intrinsic.String.Replace(V.Local.sText,"%CUSTOMER%", V.Local.sCustName, V.Local.sText)
+		
+		'Splitting variable to build up variables
+		F.Intrinsic.String.Split(V.Local.sText,"*!*",V.Local.sText)
+		
+		'Setting email's subject and body
+		V.Local.sSubject.Set(V.Local.sText(0))
+		F.Intrinsic.String.Build("{0}{1}{2}{3}", V.Local.sText(1), V.Ambient.NewLine, V.Local.sText(2), V.Local.sText(3), V.Local.sBody)
+	
+	
+		''''Building parameters for QueueMessage command
+		
+		'Get User ID
+		F.Global.Security.GetUserID(V.Caller.User, V.Caller.CompanyCode, V.Local.iUserID)
+		
+		''Building sender parameter
+		'Get email address of GS User
+		F.Global.Security.GetUserEmail(V.Caller.User, V.Local.sSenderEmail)
+		
+		'Alert and end script if no email found for GS User
+		F.Intrinsic.control.If(V.Local.sSenderEmail,=,"")
+			F.Intrinsic.UI.Msgbox("Error in email procedure. The GS User does not have an email address associated with it in User Security Maintenance.")
+			F.Intrinsic.Control.CallSub("Unload")
+		F.Intrinsic.Control.EndIf
+		
+		'Get full name of GS User
+		F.Global.Security.GetFullName(V.Caller.User, V.Caller.CompanyCode, V.Local.sSenderName)
+		
+		'Set Sender Info for Queue Message
+		f.Intrinsic.String.Concat(V.Local.sSenderEmail,"*!*", V.Local.sSenderName, V.Local.sSender)
+		''
+		
+		''Building recipients parameter
+		V.Local.sRecipients.Set(V.Args.Salesrep)
+		
+		F.Intrinsic.Control.If(V.DataTable.dtContacts.RowCount, >, 0)
+		
+			'If there is a contact, then send email to the salesrep and customer contact(s)
+			V.Local.sRecipients.Append("@!@")
+			F.Intrinsic.Control.For(V.Local.iCounter, 0, V.DataTable.dtContacts.RowCount--, 1)
+				
+				'v
+				F.Intrinsic.String.Build("{0}*!*{1}", V.DataTable.dtContacts(V.Local.iCounter).NAME!FieldValTrim, V.DataTable.dtContacts(V.Local.iCounter).EMAIL!FieldValTrim, V.Local.sTemp)
+				V.Local.sRecipients.Append(V.Local.sTemp)
+			
+				f.Intrinsic.Control.If(V.Local.iCounter, <>, V.DataTable.dtContacts.RowCount--)
+					V.Local.sRecipients.Append("@!@")
+				f.Intrinsic.Control.EndIf
+			
+			F.Intrinsic.Control.Next(V.Local.iCounter)
+	
+		F.Intrinsic.Control.Else
+			
+			'If no customer contact has 'EPACK' in UF16, then send email only to salesperson
+			'Adding a new line at the email body's to notify the salesperson of this situation
+			f.Intrinsic.String.Build("{0}{1}This email wasn't sent to the customer because there is no customer contact set up for 'EPACK' in the User Field 16. Please go to the CRM if you'd like to set a contact up.", V.Local.sText(2), V.Ambient.NewLine, v.Local.sText(2))
+			F.Intrinsic.String.Build("{0}{1}{2}{3}", V.Local.sText(1), V.Ambient.NewLine, V.Local.sText(2), V.Local.sText(3), V.Local.sBody)
+			
+		F.Intrinsic.Control.EndIf
+		''
+		
+		'Building the attachment parameter
+		F.Intrinsic.String.Build("{0}\Packlist\", V.Caller.DocDir, V.Local.sFilePath)
+		F.Intrinsic.File.GetFileList(V.Local.sFilePath, "", V.Local.sAttachment)
+		F.Intrinsic.String.Build("{0}*!*{1}", V.Local.sAttachment, V.Local.sFilePath, V.Local.sFinalPath)
+		
+		'''''
+		'Validating if SO has credit card selected as payment option. If it does, execute process below, if there isnt, queue message directly
+		F.ODBC.Connection!Con.OpenCompanyConnection
+		F.Intrinsic.String.Build("select PYMNT_TYPE from PAYMENT where ORDER_NO = '{0}' and TRANS = 'ORDER';", V.Args.SO, V.Local.sSQL)
+		F.ODBC.Connection!Con.ExecuteAndReturn(V.Local.sSQL, V.Local.sSQL)
+		F.ODBC.Connection!Con.Close
+		
+		F.Intrinsic.Control.If(V.Local.sSQL, =, "CC")
+		
+			'Credit card validation process
+			'Stopping program so we can validate credit card processor output
+			F.Intrinsic.UI.Sleep(40)
+			
+			'Validating if cc transaction was approved or denied
+			F.ODBC.Connection!Con.OpenCompanyConnection
+			F.Intrinsic.String.Build("select top 1 APRVFLAG from CC_RESPONSE_HIST where ORDER_NO = '{0}' order by TID_DATE desc;", V.Args.SO, V.Local.sSQL)
+			F.ODBC.Connection!Con.ExecuteAndReturn(V.Local.sSQL, V.Local.bApprovalFlag)
+			F.ODBC.Connection!Con.Close
+			
+			'If approval flag equals to 0, it means that the cc was denied
+			F.Intrinsic.Control.If(V.Local.bApprovalFlag, =, "0")
+				
+				'Deleting packing list generated
+				F.Intrinsic.String.Build("{0}{1}", V.Local.sFilePath, V.Local.sAttachment, V.Local.sFinalPath)
+				F.Intrinsic.File.DeleteFile(V.Local.sFinalPath)
+				'Closing project since the credit card was denied
+				F.Intrinsic.Control.End()
+		
+			F.Intrinsic.Control.EndIf
+		
+		F.Intrinsic.Control.EndIf		
+
+		'Creating message, which be later sent through Courier
+		F.Global.Messaging.QueueMessage(V.Caller.CompanyCode,V.Local.iUserID,"GCG_6537",V.Local.sSubject,V.Local.sSender, V.Local.sRecipients, V.Local.sBody,5,"",False,"","","","","","","", V.Local.sFinalPath, True)
+	
+	F.Intrinsic.Control.EndIf
+
+F.Intrinsic.Control.Catch
+
+	F.Intrinsic.Control.CallSub(CatchError)
+	
+F.Intrinsic.Control.EndTry
+
+Program.Sub.QueueEmail.End
+Program.Sub.CatchError.Start
+'To display the error
+F.Intrinsic.String.Build("Project: {0}{1}{1}Subroutine: {2}{1}Error Occurred {3} with description {4}{1}{1}GAB Version: {5}", V.Ambient.ScriptPath, V.Ambient.Newline, V.Ambient.SubroutineCalledFrom, V.Ambient.ErrorNumber, V.Ambient.ErrorDescription, V.Ambient.GABVersion, V.Global.sError) 
+F.Intrinsic.UI.Msgbox(V.Global.sError)
+F.Intrinsic.Control.CallSub("Unload")
+Program.Sub.CatchError.End
+Program.Sub.Unload.Start
+''Closes the connection if it is open
+f.Intrinsic.Control.If(v.ODBC.con.exists,=,"1") 	
+    f.ODBC.Connection!Con.Close
+f.Intrinsic.Control.EndIf
+
+'End program
+F.Intrinsic.Control.End()
+Program.Sub.Unload.End
+
+Program.Sub.Comments.Start
+${$5$}$3.0.0.0$}$1
+${$6$}$apadilla$}$20220117154027404$}$Lag9STqBJOmNXSbd5+msRcBWPGz0aFqSzPePUG9qWbxix4b1oi+tc+D4EqOaFl9Avu1bYsw2tH/kG4EiHbWzoQ==
+Program.Sub.Comments.End
