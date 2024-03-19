@@ -1,0 +1,5 @@
+Nyle Packlist #%PACKINGLIST%*!*Dear %CUSTOMER%,
+*!*Please find your packing list #%PACKINGLIST% for Order Number #%ORDERNO% with a Customer PO #%CUSTPO% that was shipped to you on %SHIPDATE%.*!*
+
+Thank you!
+%COMPANY%
